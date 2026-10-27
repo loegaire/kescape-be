@@ -1,0 +1,23 @@
+# Build artifacts
+*.exe
+*.test
+*.out
+
+# Credentials - never commit these
+kubeconfigs/
+*.kubeconfig
+*kubeconfig*
+
+# Scan output
+scan-results*.json
+results/
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Editor/backup temp files
+*~
+*.exe~
