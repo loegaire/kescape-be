@@ -1,0 +1,65 @@
+# SBOM Job template. The backend enumerates images from the target cluster and
+# passes them here; the Job pulls them and runs Syft in the RUNNER cluster.
+# Nothing is written to the target cluster.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{.JobName}}
+  namespace: {{.Namespace}}
+  labels:
+    app: kubescape-sbom
+    sbom-id: "{{.SBOMID}}"
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: kubescape-sbom
+        sbom-id: "{{.SBOMID}}"
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: sbom
+          image: {{.Image}}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SBOM_ID
+              value: "{{.SBOMID}}"
+            - name: SBOM_IMAGES
+              value: "{{.Images}}"
+            - name: SYFT_CHECK_FOR_APP_UPDATE
+              value: "false"
+            {{- if .HTTPSProxy}}
+            - name: HTTPS_PROXY
+              value: "{{.HTTPSProxy}}"
+            {{- end}}
+            {{- if .HTTPProxy}}
+            - name: HTTP_PROXY
+              value: "{{.HTTPProxy}}"
+            {{- end}}
+            {{- if .NoProxy}}
+            - name: NO_PROXY
+              value: "{{.NoProxy}}"
+            {{- end}}
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          {{- if .RegistrySecret}}
+          volumeMounts:
+            - name: registry
+              mountPath: /root/.docker
+              readOnly: true
+          {{- end}}
+      {{- if .RegistrySecret}}
+      volumes:
+        - name: registry
+          secret:
+            secretName: {{.RegistrySecret}}
+            defaultMode: 0400
+      {{- end}}

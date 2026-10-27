@@ -39,6 +39,7 @@ The target cluster is never written to. The only contact is a read-only API scan
 - [Prepare target kubeconfigs](#prepare-target-kubeconfigs)
 - [Run](#run)
 - [Web UI](#web-ui)
+- [SBOM generation](#sbom-generation)
 - [API reference](#api-reference)
 - [Sample run](#sample-run)
 - [Sample output](#sample-output)
@@ -54,6 +55,8 @@ The target cluster is never written to. The only contact is a read-only API scan
   context).
 - Triggers scans as native Kubernetes Jobs in a runner cluster.
 - Keeps the **full** Kubescape JSON report and serves it, not just a summary.
+- Lists the images visible to a target cluster and generates SPDX SBOMs for them with Syft.
+- Streams per-image SBOM progress (`pull`, `syft`, `sbom`, `done`) and serves each SBOM.
 - Simple embedded web UI with a cluster drop-down and a results link.
 - No database, no agents, no storage add-on: state lives in memory and in the runner
   cluster.
@@ -71,6 +74,8 @@ The target cluster is never written to. The only contact is a read-only API scan
   `kubescape-scanner:local`) and make it pullable by the runner cluster.
 - Kubescape releases its rego policy cache over the network. If the runner cannot reach
   GitHub, bake the cache into the image and set `KS_CACHE_DIR`.
+- An SBOM scanner image containing the Syft CLI (for example `sbom-scanner:local`, built
+  from `deploy/Dockerfile.sbom`). The runner must be able to pull the images being scanned.
 
 ## Build
 
@@ -99,6 +104,9 @@ All options are command-line flags.
 | `-scanner-image` | `kubescape-scanner:local` | Image used by the scan Job. Must contain the `kubescape` CLI. |
 | `-framework` | `NSA` | Default framework when a request omits `framework`. |
 | `-job-template` | built-in | Optional path to override `deploy/scanjob-template.yaml`. |
+| `-sbom-image` | `sbom-scanner:local` | Image used by the SBOM Job. Must contain the Syft CLI. |
+| `-registry-config` | empty | Optional `.dockerconfigjson` for pulling private images during SBOM generation. |
+| `-sbom-max-images` | `0` | Maximum images per SBOM run; `0` means all images discovered. |
 | `-addr` | `:8080` | HTTP listen address. If the port is busy it tries the next free port and logs the one it used. |
 
 Target cluster files are matched by name: a file is treated as a kubeconfig when its name
@@ -143,6 +151,50 @@ Stop with `Ctrl+C`.
 Open the printed URL (for example `http://localhost:8085`), choose a cluster, and click
 **Start scan**. The page polls the status and, when the scan finishes, shows a
 **View full results** link.
+
+The **SBOMs** link (`/sbom`) lists the images visible to the selected cluster and generates
+one SPDX document per image. The page shows the images and their current stage while the
+run is in progress.
+
+## SBOM generation
+
+The backend reads the selected target cluster with the same read-only kubeconfig used for
+scans, deduplicates image references, and creates a Job in the runner. The Job runs Syft
+sequentially, one image at a time, and writes `PROGRESS` / `SBOM` lines to the pod log. The
+backend parses those lines, so progress is visible before the run finishes.
+
+Build and load the scanner image:
+
+```powershell
+docker build -f deploy/Dockerfile.sbom -t sbom-scanner:local .
+kind load docker-image sbom-scanner:local --name <runner-cluster>
+```
+
+Trigger a run and poll it:
+
+```powershell
+$run = Invoke-RestMethod -Method Post http://localhost:8085/api/sboms `
+  -ContentType application/json -Body '{"cluster":"prod-cluster-a"}'
+Invoke-RestMethod "http://localhost:8085/api/sboms/$($run.id)"
+```
+
+Download all SBOMs (wrapped with the run state) or one document:
+
+```powershell
+Invoke-RestMethod "http://localhost:8085/api/sboms/$($run.id)/results" |
+  ConvertTo-Json -Depth 8
+Invoke-WebRequest "http://localhost:8085/api/sboms/$($run.id)/results/busybox" `
+  -OutFile busybox.spdx.json
+```
+
+Notes:
+
+- The runner needs network access to the image registries. Private images require
+  `-registry-config` (a `.dockerconfigjson`); read-only Kubernetes access alone does not
+  grant registry pulls.
+- Images are pulled and scanned sequentially, so a large image can dominate the run. Each
+  image has a 600-second Syft timeout (`SYFT_TIMEOUT`) so one image cannot block the rest.
+- Use `-sbom-max-images` to cap a run while testing.
 
 ## API reference
 
@@ -270,6 +322,51 @@ Returns all scans known to the process, newest first.
 
 Deletes the scan's `Job` and `Secret` from the runner cluster and forgets the scan.
 Returns `204 No Content`, or `404` if unknown.
+
+### `POST /api/sboms`
+
+```json
+{ "cluster": "prod-cluster-a" }
+```
+
+Lists the images visible to the target cluster and creates an SBOM Job in the runner. The
+response is an `SBOMRun` with `id`, `status`, `images`, `progress`, and `results`. The call
+returns after the image list is built; it does not wait for Syft.
+
+### `GET /api/sboms`
+
+Returns all SBOM runs known to the process, newest first.
+
+### `GET /api/sboms/{id}`
+
+Returns one run. `status` is `Pending`, `Running`, `Succeeded`, `Failed`, or `Deleted`;
+`progress` is a list of `{ts, stage, image, registry, message, bytes}` where `stage` is
+`pull`, `syft`, `sbom`, `error`, or `done`. `results` summarizes each image
+(`packages`, `bytes`, `status`).
+
+### `GET /api/sboms/{id}/results`
+
+```json
+{
+  "run": { "id": "...", "status": "Succeeded", "...": "..." },
+  "sboms": [
+    { "image": "busybox", "sbom": { "spdxVersion": "SPDX-2.3", "...": "..." } }
+  ]
+}
+```
+
+Returns `409` while the run is still in progress and `404` for an unknown id.
+
+### `GET /api/sboms/{id}/results/{image...}`
+
+Returns one SPDX document as `application/spdx+json`. The image path is the same string
+shown in `results` (for example `busybox` or `docker.io/alpine:3.13`). Returns `404` if
+that image has no SBOM.
+
+### `DELETE /api/sboms/{id}`
+
+Deletes the SBOM `Job` (and optional registry `Secret`) and forgets the run. Returns
+`204 No Content`, or `404` if unknown.
 
 ### `GET /healthz`
 
@@ -447,17 +544,21 @@ overridden with `-job-template`.
 - `Failed` scans that logged no JSON return `404` from the results endpoint.
 - The service scans one target per request; it does not schedule recurring scans. Use the
   Kubescape operator CronJob for that.
+- SBOM images are pulled and scanned sequentially; large images take proportionally longer.
+  Each image is capped at 600 seconds. SBOMs are transferred through the pod log, so very
+  large documents are limited by the log size.
 
 ## Development
 
 ```powershell
-go test ./...      # 34 tests
+go test ./...      # 50 tests
 go vet ./...
 go build -o kubescape-backend.exe .
 ```
 
 Tests cover cluster discovery and per-context isolation, Job rendering, scan creation and
-cleanup, status transitions, report parsing, results serving, and the HTTP handlers.
+cleanup, status transitions, report parsing, results serving, SBOM parsing/progress, and the
+HTTP handlers.
 
 ## Project layout
 
@@ -467,10 +568,14 @@ cleanup, status transitions, report parsing, results serving, and the HTTP handl
 ├── clusters.go                  # target discovery from kubeconfigs
 ├── render.go                    # Job template rendering
 ├── scan.go                      # Secret/Job creation, status, report handling
+├── sbom.go                      # image discovery, SBOM Job, progress, results
 ├── api.go                       # HTTP routes and handlers
-├── ui.go                        # embedded web page
+├── ui.go                        # embedded web pages
 ├── *_test.go                    # unit tests
 ├── deploy/
+│   ├── Dockerfile.sbom          # Syft scanner image
+│   ├── sbom-scan.sh             # per-image Syft loop and log protocol
+│   ├── sbomjob-template.yaml    # SBOM Job template (embedded)
 │   └── scanjob-template.yaml    # scan Job template (embedded)
 ├── go.mod
 └── go.sum

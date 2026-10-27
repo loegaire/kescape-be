@@ -16,14 +16,17 @@ import (
 
 func main() {
 	var (
-		targetsDir = flag.String("targets-dir", "./kubeconfigs", "directory of kubeconfigs for scannable target clusters")
-		runnerKC   = flag.String("runner-kubeconfig", "", "kubeconfig for the cluster that runs scan Jobs (default: $KUBECONFIG or ~/.kube/config)")
-		runnerCtx  = flag.String("runner-context", "", "context to use in the runner kubeconfig")
-		namespace  = flag.String("namespace", "kubescape", "namespace for scan Jobs and Secrets")
-		image      = flag.String("scanner-image", "kubescape-scanner:local", "scanner image (must contain the kubescape CLI)")
-		framework  = flag.String("framework", "NSA", "default framework when the request does not set one")
-		jobTmpl    = flag.String("job-template", "", "optional path to a Job template (default: built-in)")
-		addr       = flag.String("addr", ":8080", "HTTP listen address")
+		targetsDir  = flag.String("targets-dir", "./kubeconfigs", "directory of kubeconfigs for scannable target clusters")
+		runnerKC    = flag.String("runner-kubeconfig", "", "kubeconfig for the cluster that runs scan Jobs (default: $KUBECONFIG or ~/.kube/config)")
+		runnerCtx   = flag.String("runner-context", "", "context to use in the runner kubeconfig")
+		namespace   = flag.String("namespace", "kubescape", "namespace for scan Jobs and Secrets")
+		image       = flag.String("scanner-image", "kubescape-scanner:local", "scanner image (must contain the kubescape CLI)")
+		framework   = flag.String("framework", "NSA", "default framework when the request does not set one")
+		jobTmpl     = flag.String("job-template", "", "optional path to a scan Job template (default: built-in)")
+		sbomImage   = flag.String("sbom-image", "sbom-scanner:local", "scanner image for SBOM Jobs (must contain syft)")
+		registryCfg = flag.String("registry-config", "", "optional docker config.json for pulling private images")
+		sbomMax     = flag.Int("sbom-max-images", 0, "limit images per SBOM run (0 = all)")
+		addr        = flag.String("addr", ":8080", "HTTP listen address")
 	)
 	flag.Parse()
 
@@ -54,8 +57,18 @@ func main() {
 		svc.jobTmpl = tmpl
 	}
 
+	sbomSvc := NewSBOMService(client, *namespace, *sbomImage)
+	sbomSvc.maxImages = *sbomMax
+	if *registryCfg != "" {
+		cfg, err := os.ReadFile(*registryCfg)
+		if err != nil {
+			log.Fatalf("read registry config: %v", err)
+		}
+		sbomSvc.registryCfg = cfg
+	}
+
 	server := &http.Server{
-		Handler:           NewAPI(svc, clusters),
+		Handler:           NewAPI(svc, sbomSvc, clusters),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	ln, err := listenWithFallback(*addr)

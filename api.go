@@ -4,17 +4,19 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sort"
 )
 
 // API serves the drop-down UI and the scan endpoints.
 type API struct {
 	svc      *ScanService
+	sbom     *SBOMService
 	clusters []Cluster
 }
 
 // NewAPI builds the HTTP handler.
-func NewAPI(svc *ScanService, clusters []Cluster) http.Handler {
-	a := &API{svc: svc, clusters: clusters}
+func NewAPI(svc *ScanService, sbom *SBOMService, clusters []Cluster) http.Handler {
+	a := &API{svc: svc, sbom: sbom, clusters: clusters}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", a.handleIndex)
 	mux.HandleFunc("GET /healthz", a.handleHealth)
@@ -25,6 +27,14 @@ func NewAPI(svc *ScanService, clusters []Cluster) http.Handler {
 	mux.HandleFunc("GET /api/scans/{id}/results", a.handleResults)
 	mux.HandleFunc("GET /api/results/{id}", a.handleResults)
 	mux.HandleFunc("DELETE /api/scans/{id}", a.handleDeleteScan)
+
+	mux.HandleFunc("GET /sbom", a.handleSBOMIndex)
+	mux.HandleFunc("GET /api/sboms", a.handleListSBOMs)
+	mux.HandleFunc("POST /api/sboms", a.handleCreateSBOM)
+	mux.HandleFunc("GET /api/sboms/{id}", a.handleGetSBOM)
+	mux.HandleFunc("GET /api/sboms/{id}/results", a.handleSBOMResults)
+	mux.HandleFunc("GET /api/sboms/{id}/results/{image...}", a.handleSBOMResultOne)
+	mux.HandleFunc("DELETE /api/sboms/{id}", a.handleDeleteSBOM)
 	return mux
 }
 
@@ -125,6 +135,115 @@ func (a *API) handleDeleteScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) handleSBOMIndex(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(sbomHTML))
+}
+
+func (a *API) handleListSBOMs(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, a.sbom.List())
+}
+
+func (a *API) handleCreateSBOM(w http.ResponseWriter, r *http.Request) {
+	var req createScanRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	cluster, ok := a.findCluster(req.Cluster)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "unknown cluster: "+req.Cluster)
+		return
+	}
+
+	run, err := a.sbom.Create(r.Context(), cluster)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, run)
+}
+
+func (a *API) handleGetSBOM(w http.ResponseWriter, r *http.Request) {
+	run, err := a.sbom.Status(r.Context(), r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeError(w, http.StatusNotFound, "sbom run not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, run)
+}
+
+type sbomDoc struct {
+	Image string          `json:"image"`
+	SBOM  json.RawMessage `json:"sbom"`
+}
+
+type sbomResultsResponse struct {
+	Run   *SBOMRun  `json:"run"`
+	SBOMs []sbomDoc `json:"sboms"`
+}
+
+func (a *API) handleSBOMResults(w http.ResponseWriter, r *http.Request) {
+	run, sboms, err := a.sbom.Results(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeSBOMServiceError(w, err)
+		return
+	}
+	docs := make([]sbomDoc, 0, len(sboms))
+	for image, raw := range sboms {
+		docs = append(docs, sbomDoc{Image: image, SBOM: json.RawMessage(raw)})
+	}
+	sort.Slice(docs, func(i, j int) bool { return docs[i].Image < docs[j].Image })
+	writeJSON(w, http.StatusOK, sbomResultsResponse{Run: run, SBOMs: docs})
+}
+
+func (a *API) handleSBOMResultOne(w http.ResponseWriter, r *http.Request) {
+	_, sboms, err := a.sbom.Results(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeSBOMServiceError(w, err)
+		return
+	}
+	image := r.PathValue("image")
+	raw, ok := sboms[image]
+	if !ok {
+		writeError(w, http.StatusNotFound, "no SBOM for image: "+image)
+		return
+	}
+	w.Header().Set("Content-Type", "application/spdx+json")
+	w.Header().Set("Content-Disposition", `inline; filename="sbom.spdx.json"`)
+	_, _ = w.Write(raw)
+}
+
+func (a *API) handleDeleteSBOM(w http.ResponseWriter, r *http.Request) {
+	if err := a.sbom.Delete(r.Context(), r.PathValue("id")); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeError(w, http.StatusNotFound, "sbom run not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func writeSBOMServiceError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrNotFound):
+		writeError(w, http.StatusNotFound, "sbom run not found")
+	case errors.Is(err, ErrNotReady):
+		writeError(w, http.StatusConflict, "sbom run still running")
+	case errors.Is(err, ErrNoReport):
+		writeError(w, http.StatusNotFound, "sbom run produced no reports")
+	default:
+		writeError(w, http.StatusInternalServerError, err.Error())
+	}
 }
 
 func (a *API) findCluster(name string) (Cluster, bool) {

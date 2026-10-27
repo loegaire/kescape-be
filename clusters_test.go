@@ -105,12 +105,12 @@ func TestKubeconfigForContextIsolation(t *testing.T) {
 
 func TestLooksLikeKubeconfig(t *testing.T) {
 	cases := map[string]bool{
-		"config":                     false,
+		"config":                      false,
 		"readonly-fsp-api.kubeconfig": true,
-		"cluster.yaml":               true,
-		"weird.conf":                 true,
-		"llm-demo-kubeconfig 4":      true,
-		"notes.txt":                  false,
+		"cluster.yaml":                true,
+		"weird.conf":                  true,
+		"llm-demo-kubeconfig 4":       true,
+		"notes.txt":                   false,
 	}
 	for name, want := range cases {
 		if got := looksLikeKubeconfig(name); got != want {

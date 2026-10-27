@@ -1,0 +1,18 @@
+# SBOM scanner image: Alpine + the Syft CLI from the upstream image.
+#
+# Syft is copied out of anchore/syft rather than installed, because the upstream
+# image is distroless (no shell) and Alpine has no Syft package. Keeping a shell
+# lets the Job loop over the image list and emit progress lines.
+FROM anchore/syft:v1.42.3 AS syft
+
+FROM alpine:3.20
+
+RUN apk add --no-cache ca-certificates
+
+COPY --from=syft /syft /usr/local/bin/syft
+COPY deploy/sbom-scan.sh /usr/local/bin/sbom-scan.sh
+RUN sed -i 's/\r$//' /usr/local/bin/sbom-scan.sh && chmod +x /usr/local/bin/sbom-scan.sh
+
+ENV SYFT_CHECK_FOR_APP_UPDATE=false
+
+ENTRYPOINT ["/bin/sh", "/usr/local/bin/sbom-scan.sh"]

@@ -15,7 +15,11 @@ import (
 
 func newTestAPI() (http.Handler, *fake.Clientset, *ScanService) {
 	svc, cs := newTestService()
-	handler := NewAPI(svc, []Cluster{
+	sbom := NewSBOMService(cs, "kubescape", "sbom-scanner:local")
+	sbom.listImages = func(context.Context, []byte) ([]ImageRef, error) {
+		return []ImageRef{{Image: "nginx:1.27", Registry: "docker.io", Count: 1}}, nil
+	}
+	handler := NewAPI(svc, sbom, []Cluster{
 		{Name: "target", Server: "https://target.example", Source: "target.kubeconfig", kubeconfig: []byte("kubeconfig: yes\n")},
 		{Name: "other", Server: "https://other.example", Source: "other.kubeconfig", kubeconfig: []byte("kubeconfig: yes\n")},
 	})

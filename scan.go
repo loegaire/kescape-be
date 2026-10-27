@@ -297,8 +297,12 @@ func (s *ScanService) scanLogs(ctx context.Context, sc *Scan) (string, error) {
 }
 
 func kubeLogs(client kubernetes.Interface) func(context.Context, string, string) (string, error) {
+	return kubeLogsFor(client, scannerName)
+}
+
+func kubeLogsFor(client kubernetes.Interface, container string) func(context.Context, string, string) (string, error) {
 	return func(ctx context.Context, namespace, pod string) (string, error) {
-		req := client.CoreV1().Pods(namespace).GetLogs(pod, &corev1.PodLogOptions{Container: scannerName})
+		req := client.CoreV1().Pods(namespace).GetLogs(pod, &corev1.PodLogOptions{Container: container})
 		raw, err := req.Do(ctx).Raw()
 		if err != nil {
 			return "", err
