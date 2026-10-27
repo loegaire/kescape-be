@@ -1,0 +1,62 @@
+# Scan Job template. The backend substitutes the double-brace placeholders
+# and applies the result to the RUNNER cluster (the writable one, e.g. kind).
+# Nothing is ever written to the target cluster: the Job only reads it through
+# the read-only kubeconfig mounted from the Secret.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{.JobName}}
+  namespace: {{.Namespace}}
+  labels:
+    app: kubescape-xscan
+    scan-id: "{{.ScanID}}"
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 1800
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: kubescape-xscan
+        scan-id: "{{.ScanID}}"
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: scanner
+          image: {{.Image}}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: KUBECONFIG
+              value: /target/kubeconfig.yaml
+            - name: SCAN_FRAMEWORK
+              value: "{{.Framework}}"
+          command: ["/bin/sh", "-c"]
+          # The report is written to stdout so the backend can read it from the
+          # pod log. No shared volume, so this works on any runner cluster.
+          args:
+            - |
+              set -u
+              kubescape scan framework "$SCAN_FRAMEWORK" \
+                --format json \
+                --output /tmp/report.json \
+                --scan-timeout {{.Timeout}} \
+                --logger error
+              code=$?
+              echo "SCAN_EXIT=$code"
+              cat /tmp/report.json
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: target
+              mountPath: /target
+              readOnly: true
+      volumes:
+        - name: target
+          secret:
+            secretName: {{.SecretName}}
+            defaultMode: 0400
