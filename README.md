@@ -76,6 +76,12 @@ The target cluster is never written to. The only contact is a read-only API scan
   GitHub, bake the cache into the image and set `KS_CACHE_DIR`.
 - An SBOM scanner image containing the Syft CLI (for example `sbom-scanner:local`, built
   from `deploy/Dockerfile.sbom`). The runner must be able to pull the images being scanned.
+- **Target kubeconfig server address**: the `server:` URL in each target kubeconfig must be
+  reachable from the scan Job's pod in the runner cluster — a `127.0.0.1` or
+  `localhost` address that works on the host will not resolve inside the pod. Use the
+  cluster's routable API address (for example the control-plane node IP of a local kind
+  cluster). The same address must also be reachable from the service process, which lists
+  the target's images itself.
 
 ## Build
 

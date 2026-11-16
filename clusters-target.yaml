@@ -1,0 +1,7 @@
+apiVersion: kind.x-k8s.io/v1alpha4
+kind: Cluster
+name: target
+nodes:
+  - role: control-plane
+    labels:
+      kescape/role: target

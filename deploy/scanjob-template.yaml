@@ -39,11 +39,11 @@ spec:
               kubescape scan framework "$SCAN_FRAMEWORK" \
                 --format json \
                 --output /tmp/report.json \
-                --scan-timeout {{.Timeout}} \
                 --logger error
               code=$?
               echo "SCAN_EXIT=$code"
               cat /tmp/report.json
+              exit $code
           resources:
             requests:
               cpu: 250m

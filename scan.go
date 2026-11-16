@@ -185,7 +185,6 @@ func (s *ScanService) Create(ctx context.Context, c Cluster, framework string) (
 		Namespace:  sc.Namespace,
 		Image:      s.image,
 		Framework:  framework,
-		Timeout:    "20m",
 	})
 	if err != nil {
 		s.cleanup(ctx, sc)
@@ -231,13 +230,18 @@ func (s *ScanService) Status(ctx context.Context, id string) (*Scan, error) {
 
 	if (sc.Status == StatusSucceeded || sc.Status == StatusFailed) && sc.rawReport == nil {
 		if text, err := s.scanLogs(ctx, sc); err == nil {
+			if exit := scanExitCode(text); exit != "" && exit != "0" {
+				// kubescape failed even if the Job completed: the script
+				// prints SCAN_EXIT before the (empty or partial) report.
+				sc.Status = StatusFailed
+			}
 			if raw, err := extractReportJSON(text); err == nil {
 				sc.rawReport = raw
 				if rep, err := parseReportJSON(raw); err == nil {
 					sc.Report = rep
 				}
 			} else if sc.Status == StatusFailed {
-				sc.Error = err.Error()
+				sc.Error = scanFailureMessage(text, err)
 			}
 		}
 	}
@@ -333,12 +337,21 @@ type kubescapeReport struct {
 			Status string `json:"status"`
 		} `json:"controls"`
 	} `json:"summaryDetails"`
+	Metadata struct {
+		TargetMetadata struct {
+			ClusterContextMetadata struct {
+				ContextName string `json:"contextName"`
+			} `json:"clusterContextMetadata"`
+		} `json:"targetMetadata"`
+	} `json:"metadata"`
 }
 
-// extractReportJSON pulls the JSON report out of the scanner pod log. The log
-// contains a SCAN_EXIT line followed by the report, so the object is sliced
-// out from the first "{" to the last "}".
+// extractReportJSON pulls the JSON report out of the scanner pod log. The
+// report is printed after the SCAN_EXIT marker, so extraction is scoped to
+// that part of the log; anything before it (kubescape's own log lines, which
+// can be JSON) is not a report.
 func extractReportJSON(logs string) ([]byte, error) {
+	logs = afterScanExit(logs)
 	start := strings.Index(logs, "{")
 	end := strings.LastIndex(logs, "}")
 	if start < 0 || end <= start {
@@ -349,6 +362,64 @@ func extractReportJSON(logs string) ([]byte, error) {
 		return nil, fmt.Errorf("report is not valid JSON (possibly truncated)")
 	}
 	return raw, nil
+}
+
+// afterScanExit returns everything after the scanner's "SCAN_EXIT=<n>" line,
+// or the log unchanged when the marker is missing.
+func afterScanExit(logs string) string {
+	i := strings.LastIndex(logs, "SCAN_EXIT=")
+	if i < 0 {
+		return logs
+	}
+	rest := logs[i:]
+	if nl := strings.Index(rest, "\n"); nl >= 0 {
+		return rest[nl+1:]
+	}
+	return ""
+}
+
+// scanExitCode returns the value printed by the scanner's "SCAN_EXIT=<n>"
+// line, or "" when the line is missing.
+func scanExitCode(logs string) string {
+	for _, line := range strings.Split(logs, "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "SCAN_EXIT="); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// scanFailureMessage builds a short human-readable error for a failed scan,
+// preferring kubescape's own fatal message over the generic extraction error.
+func scanFailureMessage(logs string, extractErr error) string {
+	if exit := scanExitCode(logs); exit != "" && exit != "0" {
+		if msg := fatalMessage(logs); msg != "" {
+			return fmt.Sprintf("kubescape exited with code %s: %s", exit, msg)
+		}
+		return fmt.Sprintf("kubescape exited with code %s", exit)
+	}
+	return extractErr.Error()
+}
+
+// fatalMessage returns the "msg" of the first kubescape fatal log line,
+// truncated for display.
+func fatalMessage(logs string) string {
+	for _, line := range strings.Split(logs, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, `{"level":"fatal"`) {
+			continue
+		}
+		var entry struct {
+			Msg string `json:"msg"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err == nil && entry.Msg != "" {
+			if len(entry.Msg) > 300 {
+				entry.Msg = entry.Msg[:300] + "..."
+			}
+			return entry.Msg
+		}
+	}
+	return ""
 }
 
 // ParseReport extracts a summary from the scanner pod log.
@@ -366,8 +437,14 @@ func parseReportJSON(raw []byte) (*Report, error) {
 		return nil, fmt.Errorf("decode report: %w", err)
 	}
 
+	name := kr.ClusterName
+	if name == "" {
+		// Kubescape v3 reports the context under metadata instead.
+		name = kr.Metadata.TargetMetadata.ClusterContextMetadata.ContextName
+	}
+
 	rep := &Report{
-		ClusterName: kr.ClusterName,
+		ClusterName: name,
 		Score:       kr.SummaryDetails.Score,
 		Controls:    len(kr.SummaryDetails.Controls),
 	}

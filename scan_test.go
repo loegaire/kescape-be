@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -177,8 +178,65 @@ func TestStatusSucceededParsesReport(t *testing.T) {
 	}
 }
 
-func TestStatusNotFound(t *testing.T) {
-	svc, _ := newTestService()
+func TestStatusSucceededButScanFailed(t *testing.T) {
+	svc, cs := newTestService()
+	ctx := context.Background()
+	scan, err := svc.Create(ctx, testCluster(), "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	svc.logs = func(context.Context, string, string) (string, error) {
+		return `{"level":"fatal","msg":"failed to get resource: connection refused"}` + "\n" +
+			"SCAN_EXIT=1\n", nil
+	}
+	createPodWithScanLabel(t, cs, scan.ID)
+
+	job, _ := cs.BatchV1().Jobs("kubescape").Get(ctx, scan.JobName, metav1.GetOptions{})
+	job.Status.Succeeded = 1
+	if _, err := cs.BatchV1().Jobs("kubescape").UpdateStatus(ctx, job, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update status: %v", err)
+	}
+
+	got, err := svc.Status(ctx, scan.ID)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if got.Status != StatusFailed {
+		t.Fatalf("status = %q, want %q", got.Status, StatusFailed)
+	}
+	if want := "kubescape exited with code 1: failed to get resource: connection refused"; got.Error != want {
+		t.Errorf("error = %q, want %q", got.Error, want)
+	}
+}
+
+func TestScanExitCode(t *testing.T) {
+	if got := scanExitCode("SCAN_EXIT=0\n"); got != "0" {
+		t.Errorf("got %q", got)
+	}
+	if got := scanExitCode("SCAN_EXIT=1\n"); got != "1" {
+		t.Errorf("got %q", got)
+	}
+	if got := scanExitCode("no marker"); got != "" {
+		t.Errorf("got %q, want empty", got)
+	}
+}
+
+func TestFatalMessage(t *testing.T) {
+	logs := `{"level":"info","msg":"start"}` + "\n" + `{"level":"fatal","msg":"boom` + strings.Repeat("x", 400) + `"}` + "\n"
+	got := fatalMessage(logs)
+	if !strings.HasPrefix(got, "boom") {
+		t.Errorf("msg = %q", got)
+	}
+	if len(got) > 303 {
+		t.Errorf("msg not truncated: %d chars", len(got))
+	}
+	if fatalMessage("SCAN_EXIT=1\n") != "" {
+		t.Error("expected empty msg when no fatal line")
+	}
+}
+
+func TestStatusNotFound(t *testing.T) {	svc, _ := newTestService()
 	if _, err := svc.Status(context.Background(), "missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}

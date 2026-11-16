@@ -16,7 +16,6 @@ func sampleJobData() JobData {
 		Namespace:  "kubescape",
 		Image:      "kubescape-scanner:local",
 		Framework:  "NSA",
-		Timeout:    "20m",
 	}
 }
 
@@ -61,7 +60,7 @@ func TestRenderJob(t *testing.T) {
 		t.Error("SCAN_FRAMEWORK env missing")
 	}
 	script := strings.Join(c.Args, "\n")
-	for _, want := range []string{"kubescape scan framework", "--format json", "SCAN_EXIT=", "cat /tmp/report.json", "20m"} {
+	for _, want := range []string{"kubescape scan framework", "--format json", "SCAN_EXIT=", "cat /tmp/report.json"} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script missing %q", want)
 		}

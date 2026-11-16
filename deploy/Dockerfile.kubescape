@@ -1,0 +1,20 @@
+# Kubescape scanner image: the kubescape CLI from the upstream release,
+# on Alpine so a shell can emit the exit-code line the backend parses.
+#
+# The stock quay.io/kubescape/kubescape image is distroless and runs the
+# server, so it cannot perform the one-shot `kubescape scan framework` the
+# backend needs.
+FROM alpine:3.20
+
+ARG KUBESCAPE_VERSION=v3.0.34
+
+RUN apk add --no-cache ca-certificates curl bash \
+  && curl -sSfL "https://github.com/kubescape/kubescape/releases/download/${KUBESCAPE_VERSION}/kubescape-ubuntu-latest" \
+       -o /usr/local/bin/kubescape \
+  && chmod +x /usr/local/bin/kubescape
+
+ENV KS_CACHE_DIR=/tmp/.kubescape-cache \
+    KS_DISABLE_UPDATE_CHECK=true \
+    KUBESCAPE_CHECK_FOR_UPDATES=false
+
+ENTRYPOINT ["/bin/sh", "-c"]

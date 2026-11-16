@@ -21,7 +21,6 @@ type JobData struct {
 	Namespace  string
 	Image      string
 	Framework  string
-	Timeout    string
 }
 
 // RenderJob fills the template and decodes it into a typed Job.

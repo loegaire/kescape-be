@@ -1,0 +1,10 @@
+# Lean kind clusters for kescape-be testing.
+# runner: writable cluster that hosts the scan/SBOM Jobs.
+# target: read-only cluster being scanned (never written to).
+apiVersion: kind.x-k8s.io/v1alpha4
+kind: Cluster
+name: runner
+nodes:
+  - role: control-plane
+    labels:
+      kescape/role: runner
